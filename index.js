@@ -1,8 +1,32 @@
 // OTEX Riddle AI Worker — Cloudflare Worker (ES Module)
 // Race: Groq + Gemini + OpenRouter — schnellste Antwort gewinnt
 
+const DB_URL = "https://raw.githubusercontent.com/freedrag8-cell/otex-riddle-worker/refs/heads/main/database.txt";
+
+// In-memory cache (lebt solange der Worker-Isolate läuft)
+let dbCache = null;
+
+async function loadDB() {
+  if (dbCache) return dbCache;
+  const resp = await fetch(DB_URL);
+  if (!resp.ok) throw new Error("DB fetch failed: " + resp.status);
+  dbCache = await resp.text();
+  return dbCache;
+}
+
+function buildSystemPrompt(db) {
+  return `You are an expert assistant for the Roblox game "Steal a Brainrot" (SAB).
+Answer questions using ONLY the knowledge base below.
+Reply with ONLY the answer — one word or code, UPPERCASE, no punctuation, no explanation.
+If the answer is not in the knowledge base, make your best guess based on the data.
+
+KNOWLEDGE BASE:
+${db}`;
+}
+
 export default {
   async fetch(request, env) {
+    // CORS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -21,41 +45,23 @@ export default {
     try {
       body = await request.json();
     } catch {
-      return new Response(JSON.stringify({ error: "Invalid JSON" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-      });
+      return json({ error: "Invalid JSON" }, 400);
     }
 
     const question = typeof body.question === "string" ? body.question.trim() : "";
-    if (!question) {
-      return new Response(JSON.stringify({ error: "No question provided" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-      });
+    if (!question) return json({ error: "No question provided" }, 400);
+
+    // Load DB (cached after first call)
+    let db;
+    try {
+      db = await loadDB();
+    } catch (e) {
+      return json({ error: "Failed to load knowledge base", detail: String(e) }, 502);
     }
 
-    // ── Knowledge Base ──────────────────────────────────────────
-    const SYSTEM_PROMPT = `You are an expert on the Roblox game "Steal a Brainrot". Answer riddle questions with ONLY the answer word/code, no explanation, no punctuation, no extra text. Just the answer.
+    const systemPrompt = buildSystemPrompt(db);
 
-Knowledge base:
-- Real name of the game host: SAMBRATKA
-- 19th machine: BROSMACHINE (type: MACHINE)
-- Bros Machine brainrots: SCARYBROS, SCORPIBROS, NOOBINIBROS, NACHOBROS, FESTIVEFESTIVEBROS, SAMMYINIBROS
-- Best brainrot from Bros Machine: SCARYBROS
-- Second best: SAMMYINIBROS
-- Third best: FESTIVEFESTIVEBROS
-- Fourth best: SCORPIBROS
-- Fifth best: NOOBINIBROS
-- Sixth best: NACHOBROS
-
-Rules:
-- Answer with ONE word or code only
-- Always UPPERCASE
-- No punctuation, no spaces unless the answer itself has spaces
-- If unsure, give your best guess`;
-
-    // ── Provider Configs ────────────────────────────────────────
+    // ── Provider configs ────────────────────────────────────────
     const providers = [
       {
         name: "groq",
@@ -69,25 +75,25 @@ Rules:
           temperature: 0,
           max_completion_tokens: 64,
           messages: [
-            { role: "system", content: SYSTEM_PROMPT },
+            { role: "system", content: systemPrompt },
             { role: "user",   content: question },
           ],
         }),
-        extract: (data) => data?.choices?.[0]?.message?.content,
+        extract: (d) => d?.choices?.[0]?.message?.content,
       },
       {
         name: "gemini",
-        url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`,
+        url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
         headers: {
           "Content-Type": "application/json",
           "x-goog-api-key": env.GEMINI_KEY,
         },
         body: JSON.stringify({
-          system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          system_instruction: { parts: [{ text: systemPrompt }] },
           contents: [{ role: "user", parts: [{ text: question }] }],
           generationConfig: { temperature: 0, maxOutputTokens: 64 },
         }),
-        extract: (data) => data?.candidates?.[0]?.content?.parts?.[0]?.text,
+        extract: (d) => d?.candidates?.[0]?.content?.parts?.[0]?.text,
       },
       {
         name: "openrouter",
@@ -103,11 +109,11 @@ Rules:
           temperature: 0,
           max_tokens: 64,
           messages: [
-            { role: "system", content: SYSTEM_PROMPT },
+            { role: "system", content: systemPrompt },
             { role: "user",   content: question },
           ],
         }),
-        extract: (data) => data?.choices?.[0]?.message?.content,
+        extract: (d) => d?.choices?.[0]?.message?.content,
       },
     ];
 
@@ -119,18 +125,12 @@ Rules:
         body: p.body,
       });
 
-      if (!resp.ok) {
-        throw new Error(`${p.name}: HTTP ${resp.status}`);
-      }
+      if (!resp.ok) throw new Error(`${p.name}: HTTP ${resp.status}`);
 
       const data = await resp.json();
       const raw  = p.extract(data);
+      if (!raw || raw.trim() === "") throw new Error(`${p.name}: empty response`);
 
-      if (!raw || raw.trim() === "") {
-        throw new Error(`${p.name}: empty response`);
-      }
-
-      // Clean: strip whitespace, punctuation at end, uppercase
       const cleaned = raw
         .replace(/<think>[\s\S]*?<\/think>/gi, "")
         .replace(/\r?\n/g, " ")
@@ -140,28 +140,26 @@ Rules:
         .toUpperCase();
 
       if (!cleaned) throw new Error(`${p.name}: empty after clean`);
-
       return { answer: cleaned, provider: p.name };
     });
 
-    // Promise.any = erste die NICHT wirft gewinnt
     let winner;
     try {
       winner = await Promise.any(racePromises);
     } catch (err) {
-      // Alle haben gefailt
-      return new Response(JSON.stringify({ error: "All providers failed", detail: String(err) }), {
-        status: 502,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-      });
+      return json({ error: "All providers failed", detail: String(err) }, 502);
     }
 
-    return new Response(JSON.stringify({ answer: winner.answer, provider: winner.provider }), {
-      status: 200,
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-      },
-    });
+    return json({ answer: winner.answer, provider: winner.provider }, 200);
   },
 };
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
