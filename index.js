@@ -3,7 +3,6 @@
 
 const DB_URL = "https://raw.githubusercontent.com/freedrag8-cell/otex-riddle-worker/refs/heads/main/database.txt";
 
-// In-memory cache (lebt solange der Worker-Isolate läuft)
 let dbCache = null;
 
 async function loadDB() {
@@ -26,7 +25,6 @@ ${db}`;
 
 export default {
   async fetch(request, env) {
-    // CORS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -51,7 +49,15 @@ export default {
     const question = typeof body.question === "string" ? body.question.trim() : "";
     if (!question) return json({ error: "No question provided" }, 400);
 
-    // Load DB (cached after first call)
+    // Debug: secrets vorhanden?
+    const hasGroq = !!env.GROQ_KEY && env.GROQ_KEY.length > 5;
+    const hasGemini = !!env.GEMINI_KEY && env.GEMINI_KEY.length > 5;
+    const hasOR = !!env.OPENROUTER_KEY && env.OPENROUTER_KEY.length > 5;
+
+    if (!hasGroq && !hasGemini && !hasOR) {
+      return json({ error: "No secrets found", groq: hasGroq, gemini: hasGemini, openrouter: hasOR }, 500);
+    }
+
     let db;
     try {
       db = await loadDB();
@@ -61,9 +67,8 @@ export default {
 
     const systemPrompt = buildSystemPrompt(db);
 
-    // ── Provider configs ────────────────────────────────────────
     const providers = [
-      {
+      hasGroq && {
         name: "groq",
         url: "https://api.groq.com/openai/v1/chat/completions",
         headers: {
@@ -81,7 +86,7 @@ export default {
         }),
         extract: (d) => d?.choices?.[0]?.message?.content,
       },
-      {
+      hasGemini && {
         name: "gemini",
         url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
         headers: {
@@ -95,7 +100,7 @@ export default {
         }),
         extract: (d) => d?.candidates?.[0]?.content?.parts?.[0]?.text,
       },
-      {
+      hasOR && {
         name: "openrouter",
         url: "https://openrouter.ai/api/v1/chat/completions",
         headers: {
@@ -115,9 +120,9 @@ export default {
         }),
         extract: (d) => d?.choices?.[0]?.message?.content,
       },
-    ];
+    ].filter(Boolean);
 
-    // ── Race all providers ──────────────────────────────────────
+    const errors = [];
     const racePromises = providers.map(async (p) => {
       const resp = await fetch(p.url, {
         method: "POST",
@@ -125,7 +130,10 @@ export default {
         body: p.body,
       });
 
-      if (!resp.ok) throw new Error(`${p.name}: HTTP ${resp.status}`);
+      if (!resp.ok) {
+        const errBody = await resp.text();
+        throw new Error(`${p.name}: HTTP ${resp.status} — ${errBody.slice(0, 200)}`);
+      }
 
       const data = await resp.json();
       const raw  = p.extract(data);
@@ -147,7 +155,12 @@ export default {
     try {
       winner = await Promise.any(racePromises);
     } catch (err) {
-      return json({ error: "All providers failed", detail: String(err) }, 502);
+      // Collect all errors for debugging
+      const allErrors = await Promise.allSettled(racePromises);
+      const details = allErrors.map((r, i) =>
+        r.status === "rejected" ? `${providers[i].name}: ${r.reason}` : "ok"
+      );
+      return json({ error: "All providers failed", details }, 502);
     }
 
     return json({ answer: winner.answer, provider: winner.provider }, 200);
