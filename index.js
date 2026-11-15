@@ -76,7 +76,7 @@ export default {
           "Authorization": `Bearer ${env.GROQ_KEY}`,
         },
         body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
+          model: "llama3-70b-8192",
           temperature: 0,
           max_completion_tokens: 64,
           messages: [
@@ -88,7 +88,7 @@ export default {
       },
       hasGemini && {
         name: "gemini",
-        url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+        url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent",
         headers: {
           "Content-Type": "application/json",
           "x-goog-api-key": env.GEMINI_KEY,
@@ -110,7 +110,7 @@ export default {
           "X-Title": "OTEX Riddle AI",
         },
         body: JSON.stringify({
-          model: "meta-llama/llama-3.3-70b-instruct:free",
+          model: "mistralai/mistral-7b-instruct:free",
           temperature: 0,
           max_tokens: 64,
           messages: [
