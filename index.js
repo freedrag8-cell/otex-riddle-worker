@@ -76,7 +76,7 @@ export default {
           "Authorization": `Bearer ${env.GROQ_KEY}`,
         },
         body: JSON.stringify({
-          model: "openai/gpt-oss-120b",
+          model: "openai/gpt-oss-20b",
           temperature: 0,
           max_completion_tokens: 64,
           messages: [
