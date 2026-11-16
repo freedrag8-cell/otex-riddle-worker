@@ -35,33 +35,23 @@ async function loadDB(db) {
   return entry;
 }
 
-// ── Exakter DB Lookup (alle 3 DBs) ───────────────────────────
+// ── Exakter DB Lookup (alle 3 DBs, nur für einzelne Fragen) ──
 async function dbLookupAll(question) {
   const q = question.toLowerCase().trim();
 
+  // Wenn die Frage mehrere Teilfragen enthält → direkt zur AI
+  const parts = q
+    .split(/,?\s+and\s+|,?\s+what\s+|,?\s+who\s+|,?\s+which\s+|,?\s+how\s+/)
+    .map(p => p.replace(/^[\s,?]+|[\s,?]+$/g, "").trim())
+    .filter(p => p.length > 1);
+
+  if (parts.length > 1) return null; // Multi-Frage → AI
+
+  // Einzelne Frage: exakter Lookup in allen 3 DBs
   for (const db of DATABASES) {
     try {
       const entry = await loadDB(db);
-
-      // Direkt
       if (entry.map.has(q)) return entry.map.get(q);
-
-      // Multi-Fragen splitten
-      const parts = q
-        .split(/,?\s+and\s+|,?\s+what\s+|,?\s+who\s+|,?\s+which\s+|,?\s+how\s+/)
-        .map(p => p.replace(/^[\s,?]+|[\s,?]+$/g, "").trim())
-        .filter(p => p.length > 1);
-
-      if (parts.length > 1) {
-        const answers = [];
-        let allFound = true;
-        for (const part of parts) {
-          const val = entry.map.get(part);
-          if (!val) { allFound = false; break; }
-          answers.push(val);
-        }
-        if (allFound) return answers.join("");
-      }
     } catch (e) {
       // DB nicht verfügbar, weiter
     }
@@ -184,7 +174,12 @@ async function askAllAIs(question, env) {
     .filter(r => r.status === "fulfilled")
     .map(r => r.value);
 
-  if (answers.length === 0) throw new Error("All AI providers failed");
+  if (answers.length === 0) {
+    const errors = results
+      .filter(r => r.status === "rejected")
+      .map(r => r.reason?.message || String(r.reason));
+    throw new Error("All AI providers failed: " + errors.join(" | "));
+  }
 
   // Mehrheitsentscheidung
   const counts = {};
