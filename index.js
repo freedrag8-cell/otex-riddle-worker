@@ -91,7 +91,7 @@ async function askAllAIs(question, env) {
       url: "https://api.groq.com/openai/v1/chat/completions",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${env.GROQ_KEY}` },
       buildBody: (systemPrompt) => JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model: "openai/gpt-oss-20b",
         temperature: 0,
         max_completion_tokens: 64,
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: question }],
@@ -100,7 +100,7 @@ async function askAllAIs(question, env) {
     },
     hasGemini && {
       name: "gemini",
-      url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent",
+      url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
       headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_KEY },
       buildBody: (systemPrompt) => JSON.stringify({
         system_instruction: { parts: [{ text: systemPrompt }] },
@@ -119,7 +119,7 @@ async function askAllAIs(question, env) {
         "X-Title": "OTEX Riddle AI",
       },
       buildBody: (systemPrompt) => JSON.stringify({
-        model: "meta-llama/llama-3.3-70b-instruct:free",
+        model: "google/gemma-4-31b-it:free",
         temperature: 0,
         max_tokens: 64,
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: question }],
