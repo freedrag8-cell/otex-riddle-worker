@@ -45,20 +45,21 @@ async function exactLookup(question) {
 
 // ── System Prompt ─────────────────────────────────────────────
 function buildPrompt(dbText, dbName) {
-  return `You are an expert assistant for the Roblox game "Steal a Brainrot" (SAB).
-You answer questions using ONLY the knowledge base below (part ${dbName}).
+  return `You are a lookup tool for the Roblox game "Steal a Brainrot".
+You have access to ONLY the following knowledge base (${dbName}). This is your ONLY source of truth.
 
-RULES:
-- If the question contains multiple sub-questions, answer each one in order with NO spaces — concatenate directly.
-- Each answer UPPERCASE, ONE word/code only, no punctuation, no explanation.
-- Never add spaces between answers.
-- If the answer is not in your knowledge base, reply with exactly: UNKNOWN
+STRICT RULES:
+- You MUST ONLY use answers from the knowledge base below. Do NOT use any outside knowledge.
+- For each sub-question: search the knowledge base for a matching entry. If found, output the value. If NOT found in this knowledge base, output UNKNOWN for that part.
+- If the question contains multiple sub-questions, concatenate all answers with NO spaces, NO punctuation, NO explanation.
+- Each answer must be UPPERCASE, exactly as it appears in the knowledge base.
+- Do NOT guess. Do NOT use general knowledge. If the exact question is not in the knowledge base, reply UNKNOWN.
 
-EXAMPLE:
+EXAMPLE (if knowledge base only has "what is my name = SAMMY"):
 Question: "what is my name what is my favourite brainrot"
-Answer: SAMMYMEOWL
+Answer: SAMMYUNKNOWN
 
-KNOWLEDGE BASE (${dbName}):
+KNOWLEDGE BASE (${dbName}) — your ONLY source:
 ${dbText}`;
 }
 
@@ -116,8 +117,12 @@ async function askAllAIs(question, env) {
 
   if (aiConfigs.length === 0) throw new Error("No AI providers configured");
 
+  console.log(`[OTEX] Question: "${question}"`);
+  console.log(`[OTEX] Active providers: ${aiConfigs.map(a => a.name).join(", ")}`);
+
   // Alle gleichzeitig ausführen
   const tasks = await Promise.allSettled(aiConfigs.map(async (ai) => {
+    console.log(`[${ai.name.toUpperCase()}] Sending request → model: ${ai.buildBody("").includes("llama") ? "llama-3.3-70b-versatile" : ai.buildBody("").includes("gemini") ? "gemini-3.5-flash-lite" : "gemma-4-31b-it:free"}, db: ${ai.db.name}`);
     const dbEntry = await loadDB(ai.db);
     const prompt = buildPrompt(dbEntry.text, ai.db.name);
     const resp = await fetch(ai.url, {
@@ -127,11 +132,15 @@ async function askAllAIs(question, env) {
     });
     if (!resp.ok) {
       const err = await resp.text();
+      console.error(`[${ai.name.toUpperCase()}] FAILED — HTTP ${resp.status}: ${err.slice(0, 200)}`);
       throw new Error(`${ai.name}: HTTP ${resp.status} — ${err.slice(0, 150)}`);
     }
     const data = await resp.json();
     const raw = ai.extract(data);
-    if (!raw?.trim()) throw new Error(`${ai.name}: empty response`);
+    if (!raw?.trim()) {
+      console.error(`[${ai.name.toUpperCase()}] FAILED — empty response. Full data: ${JSON.stringify(data).slice(0, 300)}`);
+      throw new Error(`${ai.name}: empty response`);
+    }
     const cleaned = raw
       .replace(/<think>[\s\S]*?<\/think>/gi, "")
       .replace(/\r?\n/g, " ")
@@ -139,7 +148,12 @@ async function askAllAIs(question, env) {
       .replace(/[.!?,;:]+$/, "")
       .trim()
       .toUpperCase();
-    if (!cleaned || cleaned === "UNKNOWN") throw new Error(`${ai.name}: no answer`);
+    console.log(`[${ai.name.toUpperCase()}] Raw answer: "${raw.trim()}" → Cleaned: "${cleaned}"`);
+    if (!cleaned || cleaned === "UNKNOWN") {
+      console.warn(`[${ai.name.toUpperCase()}] Answered UNKNOWN — not in db ${ai.db.name}`);
+      throw new Error(`${ai.name}: no answer`);
+    }
+    console.log(`[${ai.name.toUpperCase()}] ✓ Answer: "${cleaned}"`);
     return { answer: cleaned, provider: ai.name };
   }));
 
@@ -151,6 +165,9 @@ async function askAllAIs(question, env) {
     .filter(r => r.status === "rejected")
     .map(r => r.reason?.message || String(r.reason));
 
+  console.log(`[OTEX] Results — fulfilled: ${answers.length}, failed: ${errors.length}`);
+  if (errors.length > 0) console.warn(`[OTEX] Errors: ${errors.join(" | ")}`);
+
   if (answers.length === 0) throw new Error("All AIs failed: " + errors.join(" | "));
 
   // Nur Antworten die nicht UNKNOWN sind zusammensetzen
@@ -158,6 +175,7 @@ async function askAllAIs(question, env) {
   if (validAnswers.length === 0) throw new Error("No AI found an answer");
 
   const combined = validAnswers.map(a => a.answer).join("");
+  console.log(`[OTEX] Final answer: "${combined}" from ${validAnswers.map(a => a.provider).join("+")}`);
 
   return {
     answer: combined,
