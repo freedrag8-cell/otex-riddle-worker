@@ -1,6 +1,6 @@
 // OTEX Riddle AI Worker — Cloudflare Worker (ES Module)
-// 3-DB Edition: DB aufgeteilt in db1/db2/db3 — jede AI bekommt einen Teil
-// Alle 3 antworten, Mehrheit gewinnt (bei Unentschieden: erste gültige)
+// Alle 3 AIs antworten mit ihrer eigenen DB — Mehrheit gewinnt
+// Exakter Lookup durchsucht alle 3 DBs zuerst
 
 const REPO_BASE = "https://raw.githubusercontent.com/freedrag8-cell/otex-riddle-worker/refs/heads/main";
 
@@ -15,13 +15,10 @@ const dbCache = new Map();
 
 async function loadDB(db) {
   if (dbCache.has(db.name)) return dbCache.get(db.name);
-
   const resp = await fetch(db.url);
   if (!resp.ok) throw new Error(`DB "${db.name}" fetch failed: ${resp.status}`);
-
   const text = await resp.text();
-  const map  = new Map();
-
+  const map = new Map();
   for (const line of text.split("\n")) {
     const eq = line.indexOf("=");
     if (eq === -1) continue;
@@ -29,32 +26,19 @@ async function loadDB(db) {
     const val = line.slice(eq + 1).trim().toUpperCase();
     if (key && val) map.set(key, val);
   }
-
   const entry = { text, map };
   dbCache.set(db.name, entry);
   return entry;
 }
 
-// ── Exakter DB Lookup (alle 3 DBs, nur für einzelne Fragen) ──
-async function dbLookupAll(question) {
+// ── Exakter Lookup in allen 3 DBs ────────────────────────────
+async function exactLookup(question) {
   const q = question.toLowerCase().trim();
-
-  // Wenn die Frage mehrere Teilfragen enthält → direkt zur AI
-  const parts = q
-    .split(/,?\s+and\s+|,?\s+what\s+|,?\s+who\s+|,?\s+which\s+|,?\s+how\s+/)
-    .map(p => p.replace(/^[\s,?]+|[\s,?]+$/g, "").trim())
-    .filter(p => p.length > 1);
-
-  if (parts.length > 1) return null; // Multi-Frage → AI
-
-  // Einzelne Frage: exakter Lookup in allen 3 DBs
   for (const db of DATABASES) {
     try {
       const entry = await loadDB(db);
       if (entry.map.has(q)) return entry.map.get(q);
-    } catch (e) {
-      // DB nicht verfügbar, weiter
-    }
+    } catch (e) {}
   }
   return null;
 }
@@ -62,48 +46,49 @@ async function dbLookupAll(question) {
 // ── System Prompt ─────────────────────────────────────────────
 function buildPrompt(dbText, dbName) {
   return `You are an expert assistant for the Roblox game "Steal a Brainrot" (SAB).
-You answer questions using ONLY the knowledge base below (part ${dbName} of the database).
+You answer questions using ONLY the knowledge base below (part ${dbName}).
 
 RULES:
 - If the question contains multiple sub-questions, answer each one in order with NO spaces — concatenate directly.
 - Each answer UPPERCASE, ONE word/code only, no punctuation, no explanation.
 - Never add spaces between answers.
-- Never guess — only use what is in the knowledge base.
-- If you don't know the answer from this knowledge base, reply with exactly: UNKNOWN
+- If the answer is not in your knowledge base, reply with exactly: UNKNOWN
 
 EXAMPLE:
-Question: "what is my name what is my favourite brainrot what is my age"
-Answer: SAMMYMEOWL24
+Question: "what is my name what is my favourite brainrot"
+Answer: SAMMYMEOWL
 
 KNOWLEDGE BASE (${dbName}):
 ${dbText}`;
 }
 
-// ── AI Race: alle 3 AIs gleichzeitig, jede mit ihrer DB ───────
+// ── Alle 3 AIs fragen, Mehrheit gewinnt ──────────────────────
 async function askAllAIs(question, env) {
-  const hasGroq   = !!env.GROQ_KEY   && env.GROQ_KEY.length   > 5;
+  const hasGroq   = !!env.GROQ_KEY && env.GROQ_KEY.length > 5;
   const hasGemini = !!env.GEMINI_KEY && env.GEMINI_KEY.length > 5;
   const hasOR     = !!env.OPENROUTER_KEY && env.OPENROUTER_KEY.length > 5;
 
-  const aiProviders = [
+  const aiConfigs = [
     hasGroq && {
       name: "groq",
+      db: DATABASES[0],
       url: "https://api.groq.com/openai/v1/chat/completions",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${env.GROQ_KEY}` },
-      buildBody: (systemPrompt) => JSON.stringify({
-        model: "openai/gpt-oss-20b",
+      buildBody: (prompt) => JSON.stringify({
+        model: "llama-3.3-70b-versatile",
         temperature: 0,
         max_completion_tokens: 64,
-        messages: [{ role: "system", content: systemPrompt }, { role: "user", content: question }],
+        messages: [{ role: "system", content: prompt }, { role: "user", content: question }],
       }),
       extract: (d) => d?.choices?.[0]?.message?.content,
     },
     hasGemini && {
       name: "gemini",
+      db: DATABASES[1],
       url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
       headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_KEY },
-      buildBody: (systemPrompt) => JSON.stringify({
-        system_instruction: { parts: [{ text: systemPrompt }] },
+      buildBody: (prompt) => JSON.stringify({
+        system_instruction: { parts: [{ text: prompt }] },
         contents: [{ role: "user", parts: [{ text: question }] }],
         generationConfig: { temperature: 0, maxOutputTokens: 64 },
       }),
@@ -111,51 +96,42 @@ async function askAllAIs(question, env) {
     },
     hasOR && {
       name: "openrouter",
+      db: DATABASES[2],
       url: "https://openrouter.ai/api/v1/chat/completions",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${env.OPENROUTER_KEY}`,
-        "HTTP-Referer": "https://otex-riddle-worker.freedrag8.workers.dev",
+        "HTTP-Referer": "https://otexriddle.freedrag8.workers.dev",
         "X-Title": "OTEX Riddle AI",
       },
-      buildBody: (systemPrompt) => JSON.stringify({
+      buildBody: (prompt) => JSON.stringify({
         model: "google/gemma-4-31b-it:free",
         temperature: 0,
         max_tokens: 64,
-        messages: [{ role: "system", content: systemPrompt }, { role: "user", content: question }],
+        messages: [{ role: "system", content: prompt }, { role: "user", content: question }],
       }),
       extract: (d) => d?.choices?.[0]?.message?.content,
     },
   ].filter(Boolean);
 
-  if (aiProviders.length === 0) throw new Error("No AI providers configured");
+  if (aiConfigs.length === 0) throw new Error("No AI providers configured");
 
-  // Jede AI bekommt eine andere DB
-  const tasks = aiProviders.map(async (provider, i) => {
-    const db = DATABASES[i % DATABASES.length];
-    let dbEntry;
-    try {
-      dbEntry = await loadDB(db);
-    } catch (e) {
-      throw new Error(`${provider.name}: DB load failed`);
-    }
-
-    const systemPrompt = buildPrompt(dbEntry.text, db.name);
-    const resp = await fetch(provider.url, {
+  // Alle gleichzeitig ausführen
+  const tasks = await Promise.allSettled(aiConfigs.map(async (ai) => {
+    const dbEntry = await loadDB(ai.db);
+    const prompt = buildPrompt(dbEntry.text, ai.db.name);
+    const resp = await fetch(ai.url, {
       method: "POST",
-      headers: provider.headers,
-      body: provider.buildBody(systemPrompt),
+      headers: ai.headers,
+      body: ai.buildBody(prompt),
     });
-
     if (!resp.ok) {
       const err = await resp.text();
-      throw new Error(`${provider.name}: HTTP ${resp.status} — ${err.slice(0, 200)}`);
+      throw new Error(`${ai.name}: HTTP ${resp.status} — ${err.slice(0, 150)}`);
     }
-
     const data = await resp.json();
-    const raw  = provider.extract(data);
-    if (!raw || raw.trim() === "") throw new Error(`${provider.name}: empty response`);
-
+    const raw = ai.extract(data);
+    if (!raw?.trim()) throw new Error(`${ai.name}: empty response`);
     const cleaned = raw
       .replace(/<think>[\s\S]*?<\/think>/gi, "")
       .replace(/\r?\n/g, " ")
@@ -163,38 +139,29 @@ async function askAllAIs(question, env) {
       .replace(/[.!?,;:]+$/, "")
       .trim()
       .toUpperCase();
+    if (!cleaned || cleaned === "UNKNOWN") throw new Error(`${ai.name}: no answer`);
+    return { answer: cleaned, provider: ai.name };
+  }));
 
-    if (!cleaned || cleaned === "UNKNOWN") throw new Error(`${provider.name}: no answer`);
-    return { answer: cleaned, provider: provider.name, db: db.name };
-  });
-
-  // Alle gleichzeitig ausführen, Ergebnisse sammeln
-  const results = await Promise.allSettled(tasks);
-  const answers = results
+  const answers = tasks
     .filter(r => r.status === "fulfilled")
     .map(r => r.value);
 
-  if (answers.length === 0) {
-    const errors = results
-      .filter(r => r.status === "rejected")
-      .map(r => r.reason?.message || String(r.reason));
-    throw new Error("All AI providers failed: " + errors.join(" | "));
-  }
+  const errors = tasks
+    .filter(r => r.status === "rejected")
+    .map(r => r.reason?.message || String(r.reason));
 
-  // Mehrheitsentscheidung
-  const counts = {};
-  for (const a of answers) {
-    counts[a.answer] = (counts[a.answer] || 0) + 1;
-  }
+  if (answers.length === 0) throw new Error("All AIs failed: " + errors.join(" | "));
 
-  // Antwort mit meisten Stimmen
-  const winner = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
-  const winnerAnswer = answers.find(a => a.answer === winner[0]);
+  // Nur Antworten die nicht UNKNOWN sind zusammensetzen
+  const validAnswers = answers.filter(a => a.answer !== "UNKNOWN");
+  if (validAnswers.length === 0) throw new Error("No AI found an answer");
+
+  const combined = validAnswers.map(a => a.answer).join("");
 
   return {
-    answer: winnerAnswer.answer,
-    provider: `${winnerAnswer.provider}:${winnerAnswer.db}`,
-    votes: counts,
+    answer: combined,
+    provider: validAnswers.map(a => a.provider).join("+"),
     all_answers: answers.map(a => `${a.provider}:${a.answer}`),
   };
 }
@@ -211,27 +178,31 @@ export default {
         },
       });
     }
-
-    if (request.method !== "POST") {
-      return new Response("Method Not Allowed", { status: 405 });
-    }
+    if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
 
     let body;
     try { body = await request.json(); }
     catch { return json({ error: "Invalid JSON" }, 400); }
 
-    const question = typeof body.question === "string" ? body.question.trim() : "";
+    let question = typeof body.question === "string" ? body.question.trim() : "";
     if (!question) return json({ error: "No question provided" }, 400);
 
-    // Erst exakter Lookup in allen 3 DBs
-    const dbAnswer = await dbLookupAll(question);
-    if (dbAnswer) {
-      return json({ answer: dbAnswer, provider: "database:exact" }, 200);
+    // +Zahl am Ende erkennen und abspalten (z.B. "+24")
+    let suffix = "";
+    const suffixMatch = question.match(/\s*\+(\d+)\s*$/);
+    if (suffixMatch) {
+      suffix = suffixMatch[1];
+      question = question.slice(0, suffixMatch.index).trim();
     }
 
-    // Alle 3 AIs fragen
+    // 1. Exakter Lookup in allen 3 DBs
+    const dbAnswer = await exactLookup(question);
+    if (dbAnswer) return json({ answer: dbAnswer + suffix, provider: "database" }, 200);
+
+    // 2. Alle 3 AIs fragen — Mehrheit gewinnt
     try {
       const result = await askAllAIs(question, env);
+      result.answer = result.answer + suffix;
       return json(result, 200);
     } catch (err) {
       return json({ error: "All providers failed", detail: String(err) }, 502);
@@ -242,9 +213,6 @@ export default {
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-    },
+    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
   });
 }
