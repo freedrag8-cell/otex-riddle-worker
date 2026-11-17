@@ -88,7 +88,7 @@ async function askAllAIs(question, env) {
     generationConfig: { temperature: 0, maxOutputTokens: 64 },
   });
   const geminiExtract = (d) => d?.candidates?.[0]?.content?.parts?.[0]?.text;
-  const geminiUrl = (key) => `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${key}`;
+  const geminiUrl = (key) => `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${key}`;
 
   // 12x Gemini, jeder mit eigenem Key und eigener DB
   const mainConfigs = geminiKeys
