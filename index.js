@@ -65,58 +65,44 @@ ${dbText}`;
 
 // ── Alle 3 AIs fragen, Mehrheit gewinnt ──────────────────────
 async function askAllAIs(question, env) {
-  const hasGemini  = !!env.GEMINI_KEY && env.GEMINI_KEY.length > 5;
-  const hasOR      = !!env.OPENROUTER_KEY && env.OPENROUTER_KEY.length > 5;
-  const hasSamba   = !!env.SAMBA_KEY && env.SAMBA_KEY.length > 5;
+  const hasGemini1 = !!env.GEMINI_KEY && env.GEMINI_KEY.length > 5;
+  const hasGemini2 = !!env.GEMINI_KEY2 && env.GEMINI_KEY2.length > 5;
+  const hasGemini3 = !!env.GEMINI_KEY3 && env.GEMINI_KEY3.length > 5;
   const hasGroq    = !!env.GROQ_KEY && env.GROQ_KEY.length > 5;
 
-  const orHeaders = {
-    "Content-Type": "application/json",
-    "Authorization": `Bearer ${env.OPENROUTER_KEY}`,
-    "HTTP-Referer": "https://otexriddle.freedrag8.workers.dev",
-    "X-Title": "OTEX Riddle AI",
-  };
+  const geminiBody = (prompt) => JSON.stringify({
+    system_instruction: { parts: [{ text: prompt }] },
+    contents: [{ role: "user", parts: [{ text: question }] }],
+    generationConfig: { temperature: 0, maxOutputTokens: 64 },
+  });
+  const geminiExtract = (d) => d?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const geminiUrl = (key) => `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${key}`;
 
-  // Haupt-Provider: OR → db1, Gemini → db2, SambaNova → db3
-  // Backup: Groq übernimmt die DB eines ausgefallenen Providers
+  // 3x Gemini, jeder mit eigenem Key und eigener DB
   const mainConfigs = [
-    hasOR && {
-      name: "openrouter",
+    hasGemini1 && {
+      name: "gemini-1",
       db: DATABASES[0],
-      url: "https://openrouter.ai/api/v1/chat/completions",
-      headers: orHeaders,
-      buildBody: (prompt) => JSON.stringify({
-        model: "nvidia/nemotron-3.5-lightning:free",
-        temperature: 0,
-        max_tokens: 64,
-        messages: [{ role: "system", content: prompt }, { role: "user", content: question }],
-      }),
-      extract: (d) => d?.choices?.[0]?.message?.content,
+      url: geminiUrl(env.GEMINI_KEY),
+      headers: { "Content-Type": "application/json" },
+      buildBody: geminiBody,
+      extract: geminiExtract,
     },
-    hasGemini && {
-      name: "gemini",
+    hasGemini2 && {
+      name: "gemini-2",
       db: DATABASES[1],
-      url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_KEY },
-      buildBody: (prompt) => JSON.stringify({
-        system_instruction: { parts: [{ text: prompt }] },
-        contents: [{ role: "user", parts: [{ text: question }] }],
-        generationConfig: { temperature: 0, maxOutputTokens: 64 },
-      }),
-      extract: (d) => d?.candidates?.[0]?.content?.parts?.[0]?.text,
+      url: geminiUrl(env.GEMINI_KEY2),
+      headers: { "Content-Type": "application/json" },
+      buildBody: geminiBody,
+      extract: geminiExtract,
     },
-    hasSamba && {
-      name: "sambanova",
+    hasGemini3 && {
+      name: "gemini-3",
       db: DATABASES[2],
-      url: "https://api.sambanova.ai/v1/chat/completions",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${env.SAMBA_KEY}` },
-      buildBody: (prompt) => JSON.stringify({
-        model: "Meta-Llama-3.3-70B-Instruct",
-        temperature: 0,
-        max_tokens: 64,
-        messages: [{ role: "system", content: prompt }, { role: "user", content: question }],
-      }),
-      extract: (d) => d?.choices?.[0]?.message?.content,
+      url: geminiUrl(env.GEMINI_KEY3),
+      headers: { "Content-Type": "application/json" },
+      buildBody: geminiBody,
+      extract: geminiExtract,
     },
   ].filter(Boolean);
 
@@ -125,7 +111,7 @@ async function askAllAIs(question, env) {
     name: "groq-backup",
     url: "https://api.groq.com/openai/v1/chat/completions",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${env.GROQ_KEY}` },
-    buildBody: (prompt, db) => JSON.stringify({
+    buildBody: (prompt) => JSON.stringify({
       model: "openai/gpt-oss-120b",
       temperature: 0,
       max_tokens: 64,
