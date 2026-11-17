@@ -1,13 +1,21 @@
 // OTEX Riddle AI Worker — Cloudflare Worker (ES Module)
-// Alle 3 AIs antworten mit ihrer eigenen DB — Mehrheit gewinnt
-// Exakter Lookup durchsucht alle 3 DBs zuerst
+// 12 DBs à ~32KB — 12x Gemini gleichzeitig, jeder liest nur seinen Teil
 
 const REPO_BASE = "https://raw.githubusercontent.com/freedrag8-cell/otex-riddle-worker/refs/heads/main";
 
 const DATABASES = [
-  { name: "db1", url: `${REPO_BASE}/db1.txt` },
-  { name: "db2", url: `${REPO_BASE}/db2.txt` },
-  { name: "db3", url: `${REPO_BASE}/db3.txt` },
+  { name: "db1",  url: `${REPO_BASE}/db1.txt`  },
+  { name: "db2",  url: `${REPO_BASE}/db2.txt`  },
+  { name: "db3",  url: `${REPO_BASE}/db3.txt`  },
+  { name: "db4",  url: `${REPO_BASE}/db4.txt`  },
+  { name: "db5",  url: `${REPO_BASE}/db5.txt`  },
+  { name: "db6",  url: `${REPO_BASE}/db6.txt`  },
+  { name: "db7",  url: `${REPO_BASE}/db7.txt`  },
+  { name: "db8",  url: `${REPO_BASE}/db8.txt`  },
+  { name: "db9",  url: `${REPO_BASE}/db9.txt`  },
+  { name: "db10", url: `${REPO_BASE}/db10.txt` },
+  { name: "db11", url: `${REPO_BASE}/db11.txt` },
+  { name: "db12", url: `${REPO_BASE}/db12.txt` },
 ];
 
 // ── DB Cache ──────────────────────────────────────────────────
@@ -65,10 +73,14 @@ ${dbText}`;
 
 // ── Alle 3 AIs fragen, Mehrheit gewinnt ──────────────────────
 async function askAllAIs(question, env) {
-  const hasGemini1 = !!env.GEMINI_KEY && env.GEMINI_KEY.length > 5;
-  const hasGemini2 = !!env.GEMINI_KEY2 && env.GEMINI_KEY2.length > 5;
-  const hasGemini3 = !!env.GEMINI_KEY3 && env.GEMINI_KEY3.length > 5;
-  const hasGroq    = !!env.GROQ_KEY && env.GROQ_KEY.length > 5;
+  // 12 Gemini Keys: GEMINI_KEY, GEMINI_KEY2 … GEMINI_KEY12
+  const geminiKeys = [
+    env.GEMINI_KEY,  env.GEMINI_KEY2,  env.GEMINI_KEY3,
+    env.GEMINI_KEY4, env.GEMINI_KEY5,  env.GEMINI_KEY6,
+    env.GEMINI_KEY7, env.GEMINI_KEY8,  env.GEMINI_KEY9,
+    env.GEMINI_KEY10,env.GEMINI_KEY11, env.GEMINI_KEY12,
+  ];
+  const hasGroq = !!env.GROQ_KEY && env.GROQ_KEY.length > 5;
 
   const geminiBody = (prompt) => JSON.stringify({
     system_instruction: { parts: [{ text: prompt }] },
@@ -78,35 +90,19 @@ async function askAllAIs(question, env) {
   const geminiExtract = (d) => d?.candidates?.[0]?.content?.parts?.[0]?.text;
   const geminiUrl = (key) => `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${key}`;
 
-  // 3x Gemini, jeder mit eigenem Key und eigener DB
-  const mainConfigs = [
-    hasGemini1 && {
-      name: "gemini-1",
-      db: DATABASES[0],
-      url: geminiUrl(env.GEMINI_KEY),
+  // 12x Gemini, jeder mit eigenem Key und eigener DB
+  const mainConfigs = geminiKeys
+    .map((key, i) => key && key.length > 5 ? {
+      name: `gemini-${i + 1}`,
+      db: DATABASES[i],
+      url: geminiUrl(key),
       headers: { "Content-Type": "application/json" },
       buildBody: geminiBody,
       extract: geminiExtract,
-    },
-    hasGemini2 && {
-      name: "gemini-2",
-      db: DATABASES[1],
-      url: geminiUrl(env.GEMINI_KEY2),
-      headers: { "Content-Type": "application/json" },
-      buildBody: geminiBody,
-      extract: geminiExtract,
-    },
-    hasGemini3 && {
-      name: "gemini-3",
-      db: DATABASES[2],
-      url: geminiUrl(env.GEMINI_KEY3),
-      headers: { "Content-Type": "application/json" },
-      buildBody: geminiBody,
-      extract: geminiExtract,
-    },
-  ].filter(Boolean);
+    } : null)
+    .filter(Boolean);
 
-  // Groq Backup-Config (wird dynamisch der fehlenden DB zugewiesen)
+  // Groq Backup (übernimmt DBs von ausgefallenen Geminis)
   const groqBackup = hasGroq ? {
     name: "groq-backup",
     url: "https://api.groq.com/openai/v1/chat/completions",
