@@ -88,7 +88,7 @@ function extractJSON(raw) {
 // ── Einzelnen Gemini anfragen ─────────────────────────────────
 async function askGemini(question, prompt, apiKey, label) {
   console.log(`[${label}] Sending request…`);
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${apiKey}`;
   const body = JSON.stringify({
     system_instruction: { parts: [{ text: prompt }] },
     contents: [{ role: "user", parts: [{ text: question }] }],
