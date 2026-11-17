@@ -65,20 +65,30 @@ ${dbText}`;
 
 // ── Alle 3 AIs fragen, Mehrheit gewinnt ──────────────────────
 async function askAllAIs(question, env) {
-  const hasGroq   = !!env.GROQ_KEY && env.GROQ_KEY.length > 5;
-  const hasGemini = !!env.GEMINI_KEY && env.GEMINI_KEY.length > 5;
-  const hasOR     = !!env.OPENROUTER_KEY && env.OPENROUTER_KEY.length > 5;
+  const hasGemini  = !!env.GEMINI_KEY && env.GEMINI_KEY.length > 5;
+  const hasOR      = !!env.OPENROUTER_KEY && env.OPENROUTER_KEY.length > 5;
+  const hasSamba   = !!env.SAMBA_KEY && env.SAMBA_KEY.length > 5;
+  const hasGroq    = !!env.GROQ_KEY && env.GROQ_KEY.length > 5;
 
-  const aiConfigs = [
-    hasGroq && {
-      name: "groq",
+  const orHeaders = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${env.OPENROUTER_KEY}`,
+    "HTTP-Referer": "https://otexriddle.freedrag8.workers.dev",
+    "X-Title": "OTEX Riddle AI",
+  };
+
+  // Haupt-Provider: OR → db1, Gemini → db2, SambaNova → db3
+  // Backup: Groq übernimmt die DB eines ausgefallenen Providers
+  const mainConfigs = [
+    hasOR && {
+      name: "openrouter",
       db: DATABASES[0],
-      url: "https://api.groq.com/openai/v1/chat/completions",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${env.GROQ_KEY}` },
+      url: "https://openrouter.ai/api/v1/chat/completions",
+      headers: orHeaders,
       buildBody: (prompt) => JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model: "nvidia/nemotron-3.5-lightning:free",
         temperature: 0,
-        max_completion_tokens: 64,
+        max_tokens: 64,
         messages: [{ role: "system", content: prompt }, { role: "user", content: question }],
       }),
       extract: (d) => d?.choices?.[0]?.message?.content,
@@ -86,7 +96,7 @@ async function askAllAIs(question, env) {
     hasGemini && {
       name: "gemini",
       db: DATABASES[1],
-      url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
+      url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent",
       headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_KEY },
       buildBody: (prompt) => JSON.stringify({
         system_instruction: { parts: [{ text: prompt }] },
@@ -95,18 +105,13 @@ async function askAllAIs(question, env) {
       }),
       extract: (d) => d?.candidates?.[0]?.content?.parts?.[0]?.text,
     },
-    hasOR && {
-      name: "openrouter",
+    hasSamba && {
+      name: "sambanova",
       db: DATABASES[2],
-      url: "https://openrouter.ai/api/v1/chat/completions",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${env.OPENROUTER_KEY}`,
-        "HTTP-Referer": "https://otexriddle.freedrag8.workers.dev",
-        "X-Title": "OTEX Riddle AI",
-      },
+      url: "https://api.sambanova.ai/v1/chat/completions",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${env.SAMBA_KEY}` },
       buildBody: (prompt) => JSON.stringify({
-        model: "google/gemma-4-31b-it:free",
+        model: "Meta-Llama-3.3-70B-Instruct",
         temperature: 0,
         max_tokens: 64,
         messages: [{ role: "system", content: prompt }, { role: "user", content: question }],
@@ -115,6 +120,22 @@ async function askAllAIs(question, env) {
     },
   ].filter(Boolean);
 
+  // Groq Backup-Config (wird dynamisch der fehlenden DB zugewiesen)
+  const groqBackup = hasGroq ? {
+    name: "groq-backup",
+    url: "https://api.groq.com/openai/v1/chat/completions",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${env.GROQ_KEY}` },
+    buildBody: (prompt, db) => JSON.stringify({
+      model: "openai/gpt-oss-120b",
+      temperature: 0,
+      max_tokens: 64,
+      messages: [{ role: "system", content: prompt }, { role: "user", content: question }],
+    }),
+    extract: (d) => d?.choices?.[0]?.message?.content,
+  } : null;
+
+  const aiConfigs = mainConfigs;
+
   if (aiConfigs.length === 0) throw new Error("No AI providers configured");
 
   console.log(`[OTEX] Question: "${question}"`);
@@ -122,7 +143,7 @@ async function askAllAIs(question, env) {
 
   // Alle gleichzeitig ausführen
   const tasks = await Promise.allSettled(aiConfigs.map(async (ai) => {
-    console.log(`[${ai.name.toUpperCase()}] Sending request → model: ${ai.buildBody("").includes("llama") ? "llama-3.3-70b-versatile" : ai.buildBody("").includes("gemini") ? "gemini-3.5-flash-lite" : "gemma-4-31b-it:free"}, db: ${ai.db.name}`);
+    console.log(`[${ai.name.toUpperCase()}] Sending request → db: ${ai.db.name}`);
     const dbEntry = await loadDB(ai.db);
     const prompt = buildPrompt(dbEntry.text, ai.db.name);
     const resp = await fetch(ai.url, {
@@ -167,6 +188,46 @@ async function askAllAIs(question, env) {
 
   console.log(`[OTEX] Results — fulfilled: ${answers.length}, failed: ${errors.length}`);
   if (errors.length > 0) console.warn(`[OTEX] Errors: ${errors.join(" | ")}`);
+
+  // Groq Backup: für jeden fehlgeschlagenen Provider mit seiner DB nochmal versuchen
+  if (groqBackup && errors.length > 0) {
+    const failedDBs = tasks
+      .map((r, i) => r.status === "rejected" ? aiConfigs[i].db : null)
+      .filter(Boolean);
+
+    console.log(`[OTEX] Groq backup kicking in for ${failedDBs.length} failed DB(s)`);
+    const backupTasks = await Promise.allSettled(failedDBs.map(async (db) => {
+      const dbEntry = await loadDB(db);
+      const prompt = buildPrompt(dbEntry.text, db.name);
+      const resp = await fetch(groqBackup.url, {
+        method: "POST",
+        headers: groqBackup.headers,
+        body: groqBackup.buildBody(prompt, db),
+      });
+      if (!resp.ok) {
+        const err = await resp.text();
+        console.error(`[GROQ-BACKUP] FAILED — HTTP ${resp.status}: ${err.slice(0, 200)}`);
+        throw new Error(`groq-backup: HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      const raw = groqBackup.extract(data);
+      if (!raw?.trim()) throw new Error("groq-backup: empty response");
+      const cleaned = raw
+        .replace(/<think>[\s\S]*?<\/think>/gi, "")
+        .replace(/\r?\n/g, " ")
+        .trim()
+        .replace(/[.!?,;:]+$/, "")
+        .trim()
+        .toUpperCase();
+      console.log(`[GROQ-BACKUP] db: ${db.name} → "${cleaned}"`);
+      if (!cleaned || cleaned === "UNKNOWN") throw new Error("groq-backup: no answer");
+      return { answer: cleaned, provider: `groq-backup:${db.name}` };
+    }));
+
+    for (const r of backupTasks) {
+      if (r.status === "fulfilled") answers.push(r.value);
+    }
+  }
 
   if (answers.length === 0) throw new Error("All AIs failed: " + errors.join(" | "));
 
