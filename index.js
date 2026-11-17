@@ -1,5 +1,5 @@
 // OTEX Riddle AI Worker — Cloudflare Worker (ES Module)
-// 1 vollständige DB (~394KB) — 1x Gemini, Groq als Backup
+// 1 vollständige DB — Gemini 1 (Haupt) + Gemini 2 (Backup)
 
 const REPO_BASE = "https://raw.githubusercontent.com/freedrag8-cell/otex-riddle-worker/refs/heads/main";
 
@@ -85,142 +85,84 @@ function extractJSON(raw) {
   }
 }
 
-// ── AI fragen ─────────────────────────────────────────────────
-async function askAI(question, env) {
-  const dbEntry = await loadDB();
-  const prompt = buildPrompt(dbEntry.text);
+// ── Einzelnen Gemini anfragen ─────────────────────────────────
+async function askGemini(question, prompt, apiKey, label) {
+  console.log(`[${label}] Sending request…`);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`;
+  const body = JSON.stringify({
+    system_instruction: { parts: [{ text: prompt }] },
+    contents: [{ role: "user", parts: [{ text: question }] }],
+    generationConfig: { temperature: 0, maxOutputTokens: 256 },
+  });
 
-  const hasGemini = !!env.GEMINI_KEY && env.GEMINI_KEY.length > 5;
-  const hasGroq   = !!env.GROQ_KEY   && env.GROQ_KEY.length > 5;
-
-  if (!hasGemini && !hasGroq) throw new Error("No AI provider configured");
-
-  // ── Gemini ───────────────────────────────────────────────────
-  if (hasGemini) {
-    console.log(`[GEMINI] Sending request…`);
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${env.GEMINI_KEY}`;
-    const geminiBody = JSON.stringify({
-      system_instruction: { parts: [{ text: prompt }] },
-      contents: [{ role: "user", parts: [{ text: question }] }],
-      generationConfig: { temperature: 0, maxOutputTokens: 256 },
-    });
-
-    try {
-      const resp = await fetch(geminiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: geminiBody,
-      });
-
-      if (!resp.ok) {
-        const err = await resp.text();
-        console.error(`[GEMINI] HTTP ${resp.status}: ${err.slice(0, 200)}`);
-        throw new Error(`Gemini HTTP ${resp.status}`);
-      }
-
-      const data = await resp.json();
-      const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!raw?.trim()) {
-        console.error(`[GEMINI] Empty response. Data: ${JSON.stringify(data).slice(0, 300)}`);
-        throw new Error("Gemini empty response");
-      }
-
-      console.log(`[GEMINI] Raw: "${raw.trim()}"`);
-
-      const withoutThink = raw.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
-      const parsed = extractJSON(withoutThink);
-
-      if (!parsed || !Array.isArray(parsed.answers) || parsed.answers.length === 0) {
-        console.error(`[GEMINI] Invalid JSON response: "${withoutThink.slice(0, 200)}"`);
-        throw new Error("Gemini invalid JSON");
-      }
-
-      // Slots bereinigen
-      const slots = parsed.answers.map(s =>
-        (typeof s === "string" ? s.trim().toUpperCase() : "UNKNOWN") || "UNKNOWN"
-      );
-
-      console.log(`[GEMINI] Slots: [${slots.join(", ")}]`);
-
-      // Finale Antwort: UNKNOWN-Slots rausfiltern, Rest zusammensetzen
-      const finalSlots = slots.filter(s => s !== "UNKNOWN");
-
-      if (finalSlots.length === 0) {
-        console.warn(`[GEMINI] All slots UNKNOWN`);
-        throw new Error("Gemini: no answer found");
-      }
-
-      const answer = finalSlots.join("");
-      console.log(`[GEMINI] ✓ Answer: "${answer}"`);
-      return { answer, provider: "gemini", slots };
-
-    } catch (geminiErr) {
-      console.warn(`[GEMINI] Failed: ${geminiErr.message} — trying Groq backup`);
-      if (!hasGroq) throw geminiErr;
-      // Groq Backup folgt unten
-      return await askGroq(question, prompt, env);
-    }
-  }
-
-  // Kein Gemini konfiguriert → direkt Groq
-  return await askGroq(question, prompt, env);
-}
-
-// ── Groq Backup ───────────────────────────────────────────────
-async function askGroq(question, prompt, env) {
-  console.log(`[GROQ] Sending backup request…`);
-  const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+  const resp = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${env.GROQ_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "openai/gpt-oss-120b",
-      temperature: 0,
-      max_tokens: 256,
-      messages: [
-        { role: "system", content: prompt },
-        { role: "user",   content: question },
-      ],
-    }),
+    headers: { "Content-Type": "application/json" },
+    body,
   });
 
   if (!resp.ok) {
     const err = await resp.text();
-    console.error(`[GROQ] HTTP ${resp.status}: ${err.slice(0, 200)}`);
-    throw new Error(`Groq HTTP ${resp.status}`);
+    console.error(`[${label}] HTTP ${resp.status}: ${err.slice(0, 200)}`);
+    throw new Error(`${label}: HTTP ${resp.status}`);
   }
 
   const data = await resp.json();
-  const raw = data?.choices?.[0]?.message?.content;
-  if (!raw?.trim()) throw new Error("Groq empty response");
+  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!raw?.trim()) {
+    console.error(`[${label}] Empty response. Data: ${JSON.stringify(data).slice(0, 300)}`);
+    throw new Error(`${label}: empty response`);
+  }
 
-  console.log(`[GROQ] Raw: "${raw.trim()}"`);
+  console.log(`[${label}] Raw: "${raw.trim()}"`);
 
   const withoutThink = raw.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
   const parsed = extractJSON(withoutThink);
 
   if (!parsed || !Array.isArray(parsed.answers) || parsed.answers.length === 0) {
-    console.error(`[GROQ] Invalid JSON: "${withoutThink.slice(0, 200)}"`);
-    throw new Error("Groq invalid JSON");
+    console.error(`[${label}] Invalid JSON: "${withoutThink.slice(0, 200)}"`);
+    throw new Error(`${label}: invalid JSON`);
   }
 
   const slots = parsed.answers.map(s =>
     (typeof s === "string" ? s.trim().toUpperCase() : "UNKNOWN") || "UNKNOWN"
   );
 
-  console.log(`[GROQ] Slots: [${slots.join(", ")}]`);
+  console.log(`[${label}] Slots: [${slots.join(", ")}]`);
 
   const finalSlots = slots.filter(s => s !== "UNKNOWN");
   if (finalSlots.length === 0) {
-    console.warn(`[GROQ] All slots UNKNOWN`);
-    throw new Error("Groq: no answer found");
+    console.warn(`[${label}] All slots UNKNOWN`);
+    throw new Error(`${label}: no answer found`);
   }
 
   const answer = finalSlots.join("");
-  console.log(`[GROQ] ✓ Answer: "${answer}"`);
-  return { answer, provider: "groq", slots };
+  console.log(`[${label}] ✓ Answer: "${answer}"`);
+  return { answer, provider: label.toLowerCase(), slots };
+}
+
+// ── AI fragen (Gemini 1 → Gemini 2 als Backup) ───────────────
+async function askAI(question, env) {
+  const dbEntry = await loadDB();
+  const prompt = buildPrompt(dbEntry.text);
+
+  const hasGemini1 = !!env.GEMINI_KEY  && env.GEMINI_KEY.length  > 5;
+  const hasGemini2 = !!env.GEMINI_KEY2 && env.GEMINI_KEY2.length > 5;
+
+  if (!hasGemini1 && !hasGemini2) throw new Error("No AI provider configured");
+
+  // ── Gemini 1 (Haupt) ─────────────────────────────────────────
+  if (hasGemini1) {
+    try {
+      return await askGemini(question, prompt, env.GEMINI_KEY, "GEMINI-1");
+    } catch (err) {
+      console.warn(`[GEMINI-1] Failed: ${err.message} — trying Gemini 2 backup`);
+      if (!hasGemini2) throw err;
+    }
+  }
+
+  // ── Gemini 2 (Backup) ────────────────────────────────────────
+  return await askGemini(question, prompt, env.GEMINI_KEY2, "GEMINI-2");
 }
 
 // ── Main Handler ──────────────────────────────────────────────
