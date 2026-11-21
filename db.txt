@@ -1,3 +1,4 @@
+newest mutation = HACKER
 1 1 brainrot = 155
 1 1 exist = 155
 1 1s brainrot = 155
