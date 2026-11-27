@@ -1,9 +1,14 @@
 // OTEX Riddle AI Worker — Cloudflare Worker (ES Module)
-// 1 vollständige DB — Gemini 1 (Haupt) + Gemini 2 (Backup)
+// 1 vollständige DB — Gemini 1 (Haupt) + Gemini 2 (Backup) + Unknown Logger
 
 const REPO_BASE = "https://raw.githubusercontent.com/freedrag8-cell/otex-riddle-worker/refs/heads/main";
-
 const DATABASE_URL = `${REPO_BASE}/db.txt`;
+
+// GitHub Unknown Logger Config
+const GITHUB_OWNER = "freedrag8-cell";
+const GITHUB_REPO = "otex-riddle-worker";
+const GITHUB_FILE = "unknown.txt";
+const GITHUB_BRANCH = "main";
 
 // ── DB Cache ──────────────────────────────────────────────────
 let dbCache = null;
@@ -35,6 +40,73 @@ async function exactLookup(question) {
     console.error(`[OTEX] exactLookup error: ${e}`);
   }
   return null;
+}
+
+// ── GitHub Unknown Logger ─────────────────────────────────────
+async function logUnknown(question, token) {
+  if (!token) return;
+  try {
+    const apiBase = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_FILE}`;
+
+    // Aktuelle Datei holen
+    let currentContent = "";
+    let sha = null;
+
+    const getResp = await fetch(apiBase, {
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "OTEX-Worker"
+      }
+    });
+
+    if (getResp.ok) {
+      const data = await getResp.json();
+      sha = data.sha;
+      currentContent = atob(data.content.replace(/\n/g, ""));
+    }
+
+    // Duplikat Check
+    const lines = currentContent.split("\n").map(l => l.trim()).filter(Boolean);
+    const questionLower = question.toLowerCase().trim();
+    if (lines.some(l => l.toLowerCase().includes(questionLower))) {
+      console.log(`[LOGGER] Already logged: "${question}"`);
+      return;
+    }
+
+    // Neue Zeile hinzufügen
+    const timestamp = new Date().toISOString().slice(0, 10);
+    const newContent = currentContent
+      ? currentContent.trimEnd() + `\n${timestamp} | ${question}\n`
+      : `${timestamp} | ${question}\n`;
+
+    const body = {
+      message: `log: unknown "${question.slice(0, 50)}"`,
+      content: btoa(unescape(encodeURIComponent(newContent))),
+      branch: GITHUB_BRANCH,
+    };
+    if (sha) body.sha = sha;
+
+    const putResp = await fetch(apiBase, {
+      method: "PUT",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "User-Agent": "OTEX-Worker"
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (putResp.ok) {
+      console.log(`[LOGGER] ✓ Logged: "${question}"`);
+    } else {
+      const err = await putResp.text();
+      console.error(`[LOGGER] Failed: ${putResp.status} ${err.slice(0, 200)}`);
+    }
+  } catch (e) {
+    console.error(`[LOGGER] Error: ${e}`);
+  }
 }
 
 // ── System Prompt ─────────────────────────────────────────────
@@ -151,7 +223,6 @@ async function askAI(question, env) {
 
   if (!hasGemini1 && !hasGemini2) throw new Error("No AI provider configured");
 
-  // ── Gemini 1 (Haupt) ─────────────────────────────────────────
   if (hasGemini1) {
     try {
       return await askGemini(question, prompt, env.GEMINI_KEY, "GEMINI-1");
@@ -161,13 +232,12 @@ async function askAI(question, env) {
     }
   }
 
-  // ── Gemini 2 (Backup) ────────────────────────────────────────
   return await askGemini(question, prompt, env.GEMINI_KEY2, "GEMINI-2");
 }
 
 // ── Main Handler ──────────────────────────────────────────────
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -211,6 +281,12 @@ export default {
       return json({ answer: result.answer, provider: result.provider }, 200);
     } catch (err) {
       console.error(`[OTEX] All providers failed: ${err}`);
+
+      // ── Unknown Logger ────────────────────────────────────────
+      if (env.GITHUB_TOKEN) {
+        ctx.waitUntil(logUnknown(question, env.GITHUB_TOKEN));
+      }
+
       return json({ error: "All providers failed", detail: String(err) }, 502);
     }
   },
